@@ -1,0 +1,57 @@
+# Roadsend iOS: builds the Xcode project that Unity exports on our Linux machine, signs it and uploads it to TestFlight.
+# No game files live here. Each build is started through Codemagic's API with:
+#   EXPORT_URL     an expiring download link to Roadsend_ios_<n>.tar.gz (a folder "Roadsend" with Unity-iPhone.xcodeproj)
+#   EXPORT_SHA256  its SHA-256
+# The App Store Connect API key and the signing certificate's private key are the "appstore" group's secure variables.
+workflows:
+  ios-testflight:
+    name: Roadsend iOS to TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      groups:
+        - appstore
+      xcode: latest
+      vars:
+        BUNDLE_ID: com.sykeepai.roadsend
+        APP_STORE_APP_ID: "6821610275"
+        XCODE_PROJECT: Roadsend/Unity-iPhone.xcodeproj
+        XCODE_SCHEME: Unity-iPhone
+    scripts:
+      - name: Download the Xcode export
+        script: |
+          set -euo pipefail
+          test -n "${EXPORT_URL:-}" || { echo "EXPORT_URL is not set"; exit 1; }
+          curl -fL --retry 3 --retry-delay 5 -o export.tar.gz "$EXPORT_URL"
+          if [ -n "${EXPORT_SHA256:-}" ]; then echo "$EXPORT_SHA256  export.tar.gz" | shasum -a 256 -c -; fi
+          tar xzf export.tar.gz
+          rm export.tar.gz
+          test -d "$XCODE_PROJECT"
+          du -sh Roadsend
+      - name: Signing files
+        script: |
+          set -euo pipefail
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles --project "$XCODE_PROJECT"
+      - name: Build number
+        script: |
+          set -euo pipefail
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APP_ID" 2>/dev/null || echo 0)
+          NEXT=$(( ${LATEST:-0} + 1 ))
+          if [ -n "${MIN_BUILD:-}" ] && [ "$NEXT" -lt "$MIN_BUILD" ]; then NEXT=$MIN_BUILD; fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" Roadsend/Info.plist
+          echo "CFBundleVersion $NEXT (latest on TestFlight: ${LATEST:-none})"
+      - name: Build the ipa
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
