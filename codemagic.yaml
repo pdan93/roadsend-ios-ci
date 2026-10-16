@@ -1,4 +1,4 @@
-# Roadsend iOS: builds the Xcode project that Unity exports on our Linux machine, signs it and uploads it to TestFlight.
+# Roadsend and Cinderbash iOS: two workflows (ios-testflight = Roadsend, cinderbash-testflight = Cinderbash). Each builds the Xcode project that Unity exports on our Linux machine, signs it and uploads it to TestFlight.
 # No game files live here. Each build is started through Codemagic's API with:
 #   EXPORT_URL     an expiring download link to Roadsend_ios_<n>.tar.gz (a folder "Roadsend" with Unity-iPhone.xcodeproj)
 #   EXPORT_SHA256  its SHA-256
@@ -55,3 +55,78 @@ workflows:
         api_key: $APP_STORE_CONNECT_PRIVATE_KEY
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+
+  cinderbash-testflight:
+    name: Cinderbash iOS to TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: latest
+      cocoapods: default
+      groups:
+        - appstore
+      vars:
+        BUNDLE_ID: com.sykeepai.cinderbash
+        APP_STORE_APP_ID: "6823576326"      # Cinderbash app record in App Store Connect
+        PROJECT_DIR: Cinderbash             # folder name inside the archive
+        XCODE_PROJECT: Cinderbash/Unity-iPhone.xcodeproj
+        XCODE_WORKSPACE: Cinderbash/Unity-iPhone.xcworkspace
+        XCODE_SCHEME: Unity-iPhone
+        # Passed per build in the API call, not stored here: EXPORT_URL, EXPORT_SHA256; optional MIN_BUILD.
+    scripts:
+      - name: Download the Xcode export
+        script: |
+          set -euo pipefail
+          if [ -z "${EXPORT_URL:-}" ]; then echo "ERROR: EXPORT_URL is not set. Start the build with Tools/CI/codemagic_start.py (it passes EXPORT_URL and EXPORT_SHA256)."; exit 1; fi
+          if [ -z "${EXPORT_SHA256:-}" ]; then echo "ERROR: EXPORT_SHA256 is not set."; exit 1; fi
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -o export.tar.gz "$EXPORT_URL"
+          ACTUAL=$(shasum -a 256 export.tar.gz | awk '{print $1}')
+          if [ "$ACTUAL" != "$(echo "$EXPORT_SHA256" | tr 'A-F' 'a-f')" ]; then echo "ERROR: SHA-256 mismatch (got $ACTUAL)"; exit 1; fi
+          tar xzf export.tar.gz
+          rm -f export.tar.gz
+          test -d "$XCODE_PROJECT" || { echo "ERROR: $XCODE_PROJECT not found in the archive"; ls; exit 1; }
+      - name: CocoaPods (when the export has a Podfile)
+        script: |
+          set -euo pipefail
+          # Firebase 13.x comes in as a Swift Package, so the exported Podfile is normally empty: skip pod install then
+          # (an empty Podfile makes no workspace and xcodebuild resolves the Swift package itself).
+          if [ -f "$PROJECT_DIR/Podfile" ] && grep -Eq '^[[:space:]]*pod[[:space:]]' "$PROJECT_DIR/Podfile"; then
+            cd "$PROJECT_DIR"
+            pod install || pod install --repo-update
+            ls -d Unity-iPhone.xcworkspace
+          else
+            echo "No pods in the Podfile, building the xcodeproj"
+          fi
+      - name: Set up signing files
+        script: |
+          set -euo pipefail
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles --project "$XCODE_PROJECT"
+      - name: Set the build number (TestFlight latest + 1)
+        script: |
+          set -euo pipefail
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APP_ID" 2>/dev/null | tail -n1 | tr -dc '0-9' || true)
+          LATEST=${LATEST:-0}
+          NEXT=$((LATEST + 1))
+          if [ -n "${MIN_BUILD:-}" ] && [ "$MIN_BUILD" -gt "$NEXT" ]; then NEXT=$MIN_BUILD; fi
+          echo "TestFlight latest: $LATEST, building number $NEXT"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" "$PROJECT_DIR/Info.plist"
+      - name: Build the ipa
+        script: |
+          set -euo pipefail
+          if [ -d "$XCODE_WORKSPACE" ]; then
+            xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+          else
+            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+          fi
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        # Same as Roadsend's proven workflow: upload only. The internal TestFlight group (automatic distribution on) picks the build up.
