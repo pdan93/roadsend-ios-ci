@@ -43,14 +43,14 @@ workflows:
           if [ -n "${MIN_BUILD:-}" ] && [ "$NEXT" -lt "$MIN_BUILD" ]; then NEXT=$MIN_BUILD; fi
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" Roadsend/Info.plist
           echo "CFBundleVersion $NEXT (latest on TestFlight: ${LATEST:-none})"
-      - name: CocoaPods (Firebase, since 1.2)
+      - name: CocoaPods (only if the export's Podfile lists pods; Firebase comes by Swift packages)
         script: |
           set -euo pipefail
-          if [ -f Roadsend/Podfile ]; then
+          if [ -f Roadsend/Podfile ] && grep -qE "^[[:space:]]*pod " Roadsend/Podfile; then
             cd Roadsend
             pod install --repo-update
           else
-            echo "no Podfile: nothing to install"
+            echo "no pods: nothing to install"
           fi
       - name: Build the ipa
         script: |
