@@ -43,10 +43,23 @@ workflows:
           if [ -n "${MIN_BUILD:-}" ] && [ "$NEXT" -lt "$MIN_BUILD" ]; then NEXT=$MIN_BUILD; fi
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" Roadsend/Info.plist
           echo "CFBundleVersion $NEXT (latest on TestFlight: ${LATEST:-none})"
+      - name: CocoaPods (Firebase, since 1.2)
+        script: |
+          set -euo pipefail
+          if [ -f Roadsend/Podfile ]; then
+            cd Roadsend
+            pod install --repo-update
+          else
+            echo "no Podfile: nothing to install"
+          fi
       - name: Build the ipa
         script: |
           set -euo pipefail
-          xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+          if [ -d Roadsend/Unity-iPhone.xcworkspace ]; then
+            xcode-project build-ipa --workspace Roadsend/Unity-iPhone.xcworkspace --scheme "$XCODE_SCHEME"
+          else
+            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+          fi
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
